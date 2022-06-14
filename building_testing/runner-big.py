@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[20]:
 
 
 import os
@@ -9,7 +9,7 @@ import json
 from itertools import groupby
 from torch.optim import Adam
 from torch.nn import functional as nnf
-import torchvision.transforms as transforms
+from torchvision.transforms import functional as transforms
 from torchvision.transforms import ToTensor
 from tqdm import tqdm
 import torch
@@ -17,7 +17,6 @@ from torch import nn
 
 import matplotlib.pyplot as plt
 
-import clip
 import numpy as np
 from os.path import join, isdir, expanduser
 from PIL import Image
@@ -27,24 +26,51 @@ from time import time, sleep
 
 data_path = expanduser('~/datasets')
 
-exp_id = "04"
+exp_id = "01"
 
 
-# In[2]:
+# In[24]:
 
 
-trained_clip, _ = clip.load("ViT-B/32", device="cuda")
+# num_images = 1000
+# size = (256,256)
 
-batch_size = 16
+# trainA_path = ["share", "Florian_Jonas_construction"]
+# trainB_path = ["share", "Florian_Jonas_finished"]
 
-train_A = torch.load("A.pt")
-train_B = torch.load("B.pt")
+# train_A_files = os.listdir(join(data_path, *trainA_path))
+# train_B_files = os.listdir(join(data_path, *trainB_path))
+
+
+# train_A_raw = [Image.open(join(data_path, *trainA_path, f)).resize(size)
+#           for f in tqdm(train_A_files[30:num_images], desc="A loading") if f.endswith('.jpg')]
+
+# train_B_raw = [Image.open(join(data_path, *trainB_path, f)).resize(size)
+#           for f in tqdm(train_B_files[30:num_images], desc="B loading") if f.endswith('.jpg')]
+
+
+# trans = ToTensor()
+
+# train_A = [trans(img) for img in tqdm(train_A_raw, desc="A processing") if trans(img).shape == (3, 256, 256)]
+# train_B = [trans(img) for img in tqdm(train_B_raw, desc="B processing") if trans(img).shape == (3, 256, 256)]
+
+# torch.save(train_A, "A.pt")
+# torch.save(train_B, "B.pt")
+
+
+# In[3]:
+
+
+batch_size = 32
+
+train_A = torch.load("A_big.pt")
+train_B = torch.load("B_big.pt")
 
 A_loader = torch.utils.data.DataLoader(train_A, batch_size=batch_size, shuffle=True, drop_last=True)
 B_loader = torch.utils.data.DataLoader(train_B, batch_size=batch_size, shuffle=True, drop_last=True)
 
 
-# In[3]:
+# In[5]:
 
 
 class ResBlock(nn.Module):
@@ -72,7 +98,7 @@ del resblock
 del dummydata
 
 
-# In[4]:
+# In[6]:
 
 
 class Generator(nn.Module):
@@ -108,19 +134,32 @@ del gen
 del dummydata
 
 
-# In[5]:
+# In[8]:
 
 
 class Discriminator(nn.Module):
     
-    def __init__(self, clip):
+    def __init__(self, d=64):
         super().__init__()
         
-        self.resizer = transforms.Resize(224, interpolation=Image.BICUBIC)
+        self.lrelu = nn.LeakyReLU(0.2)
         
-        self.encoder = clip.encode_image
+        self.conv1 = nn.Conv2d(3, d, 4, 2, 1)
+       
+        self.conv2 = nn.Conv2d(d, d * 2, 4, 2, 1)
+        self.conv2_bn = nn.BatchNorm2d(d * 2)
+        
+        self.conv3 = nn.Conv2d(d * 2, d * 4, 4, 2, 1)
+        self.conv3_bn = nn.BatchNorm2d(d * 4)
+        
+        self.conv4 = nn.Conv2d(d * 4, d * 8, 4, 1, 1)
+        self.conv4_bn = nn.BatchNorm2d(d * 8)
+        
+        self.conv5 = nn.Conv2d(d * 8, 1, 4, 1, 1)
+        
+        self.pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
-        self.linear = nn.Linear(512,1)
+        self.linear = nn.Linear(d * 8,1)
         self.sig = nn.Sigmoid()
         
         
@@ -128,15 +167,17 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         
-        x = self.resizer(x)
+        x = self.lrelu(self.conv1(x))
+        x = self.lrelu(self.conv2_bn(self.conv2(x)))
+        x = self.lrelu(self.conv3_bn(self.conv3(x)))
+        x = self.lrelu(self.conv4_bn(self.conv4(x)))
         
-        x = self.flatten(self.encoder(x)).float()
-        x = self.sig(self.linear(x))
+        x = self.sig((self.linear(self.flatten(self.pool(x)))))
 
         return x
 
         
-dis = Discriminator(trained_clip).cuda()
+dis = Discriminator(64).cuda()
 dummydata = torch.randn([batch_size,3,128,128]).cuda()
 print(dis(dummydata).shape)
 
@@ -145,7 +186,7 @@ del dis
 del dummydata
 
 
-# In[6]:
+# In[11]:
 
 
 from torchvision.transforms import Resize, RandomCrop, RandomHorizontalFlip, ToTensor, Normalize, Compose, InterpolationMode
@@ -176,14 +217,14 @@ test = next(iter(A_loader))
 res = transform_pipeline(test)
 
 
-# In[7]:
+# In[21]:
 
 
 G_ab = Generator().cuda()
 G_ba = Generator().cuda()
 
-D_a = Discriminator(trained_clip).cuda()
-D_b = Discriminator(trained_clip).cuda()
+D_a = Discriminator(d=128).cuda()
+D_b = Discriminator(d=128).cuda()
 
 opt_G = Adam(list(G_ab.parameters()) + list(G_ba.parameters()), lr=0.0002, betas=(0.5, 0.999))
 opt_D_a = Adam(D_a.parameters(), lr=0.0001, betas=(0.5, 0.999))
@@ -191,7 +232,7 @@ opt_D_b = Adam(D_b.parameters(), lr=0.0001, betas=(0.5, 0.999))
 losses = [[], [], []]
 
 
-# In[8]:
+# In[22]:
 
 
 def saver(G_ab, G_ba, D_a, D_b, exp_id = ""):
@@ -210,7 +251,7 @@ def saver(G_ab, G_ba, D_a, D_b, exp_id = ""):
         
 
 
-# In[12]:
+# In[23]:
 
 
 epochs = 999
@@ -250,23 +291,19 @@ for i in range(epochs):
         loss_g.backward()
         opt_G.step()
 
-        
-        loss_d_a = 0
-        loss_d_b = 0
         # train discriminator A
-        if i % 2 == 0:
-            opt_D_a.zero_grad()
-            loss_d_a = 0.5 * nnf.mse_loss(D_a(a_batch), ones)
-            loss_d_a += 0.5 * nnf.mse_loss(D_a(fake_a.detach()), zeros)
-            loss_d_a.backward()
-            opt_D_a.step()
+        opt_D_a.zero_grad()
+        loss_d_a = 0.5 * nnf.mse_loss(D_a(a_batch), ones)
+        loss_d_a += 0.5 * nnf.mse_loss(D_a(fake_a.detach()), zeros)
+        loss_d_a.backward()
+        opt_D_a.step()
 
-            # train discriminator B
-            opt_D_b.zero_grad()
-            loss_d_b = 0.5 * nnf.mse_loss(D_b(b_batch), ones)
-            loss_d_b += 0.5 * nnf.mse_loss(D_b(fake_b.detach()), zeros)
-            loss_d_b.backward()
-            opt_D_b.step()
+        # train discriminator B
+        opt_D_b.zero_grad()
+        loss_d_b = 0.5 * nnf.mse_loss(D_b(b_batch), ones)
+        loss_d_b += 0.5 * nnf.mse_loss(D_b(fake_b.detach()), zeros)
+        loss_d_b.backward()
+        opt_D_b.step()
 
         losses[0] += [float(loss_g)]
         losses[1] += [float(loss_d_a)]
@@ -280,7 +317,7 @@ for i in range(epochs):
     print(f'generator: {np.mean(losses[0]):.5f}, D_a: {np.mean(losses[1]):.5f}, D_b: {np.mean(losses[2]):.5f}')
 
 
-# In[10]:
+# In[9]:
 
 
 test_a = next(iter(A_loader))
@@ -292,7 +329,7 @@ res = G_ab(test_a[:10].cuda()).cpu().detach()
 show(res)
 
 
-# In[11]:
+# In[10]:
 
 
 test_b = next(iter(B_loader))
