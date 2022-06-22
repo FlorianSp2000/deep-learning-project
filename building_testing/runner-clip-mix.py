@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[20]:
+# In[1]:
 
 
 import os
@@ -9,7 +9,7 @@ import json
 from itertools import groupby
 from torch.optim import Adam
 from torch.nn import functional as nnf
-from torchvision.transforms import functional as transforms
+import torchvision.transforms as transforms
 from torchvision.transforms import ToTensor
 from tqdm import tqdm
 import torch
@@ -17,6 +17,7 @@ from torch import nn
 
 import matplotlib.pyplot as plt
 
+import clip
 import numpy as np
 from os.path import join, isdir, expanduser
 from PIL import Image
@@ -26,42 +27,15 @@ from time import time, sleep
 
 data_path = expanduser('~/datasets')
 
-exp_id = "06"
+exp_id = "07 mix"
 
 
-# In[24]:
+# In[2]:
 
 
-# num_images = 1000
-# size = (256,256)
+trained_clip, _ = clip.load("ViT-B/32", device="cuda")
 
-# trainA_path = ["share", "Florian_Jonas_construction"]
-# trainB_path = ["share", "Florian_Jonas_finished"]
-
-# train_A_files = os.listdir(join(data_path, *trainA_path))
-# train_B_files = os.listdir(join(data_path, *trainB_path))
-
-
-# train_A_raw = [Image.open(join(data_path, *trainA_path, f)).resize(size)
-#           for f in tqdm(train_A_files[30:num_images], desc="A loading") if f.endswith('.jpg')]
-
-# train_B_raw = [Image.open(join(data_path, *trainB_path, f)).resize(size)
-#           for f in tqdm(train_B_files[30:num_images], desc="B loading") if f.endswith('.jpg')]
-
-
-# trans = ToTensor()
-
-# train_A = [trans(img) for img in tqdm(train_A_raw, desc="A processing") if trans(img).shape == (3, 256, 256)]
-# train_B = [trans(img) for img in tqdm(train_B_raw, desc="B processing") if trans(img).shape == (3, 256, 256)]
-
-# torch.save(train_A, "A.pt")
-# torch.save(train_B, "B.pt")
-
-
-# In[3]:
-
-
-batch_size = 10
+batch_size = 16
 
 train_A = torch.load("A.pt")
 train_B = torch.load("B.pt")
@@ -70,7 +44,7 @@ A_loader = torch.utils.data.DataLoader(train_A, batch_size=batch_size, shuffle=T
 B_loader = torch.utils.data.DataLoader(train_B, batch_size=batch_size, shuffle=True, drop_last=True)
 
 
-# In[5]:
+# In[3]:
 
 
 class ResBlock(nn.Module):
@@ -98,7 +72,7 @@ del resblock
 del dummydata
 
 
-# In[6]:
+# In[4]:
 
 
 class Generator(nn.Module):
@@ -137,7 +111,46 @@ del dummydata
 # In[8]:
 
 
-class Discriminator(nn.Module):
+class Discriminator_clip(nn.Module):
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.resizer = transforms.Resize(224, interpolation=Image.BICUBIC)
+        
+        clip_trained, _ = clip.load("ViT-B/32", device="cuda")
+        self.encoder = clip_trained.encode_image
+        
+        self.flatten = nn.Flatten()
+        self.linear = nn.Linear(512,1)
+        self.sig = nn.Sigmoid()
+        
+        
+        
+
+    def forward(self, x):
+        
+        x = self.resizer(x)
+        
+        x = self.flatten(self.encoder(x)).float()
+        x = self.sig(self.linear(x))
+
+        return x
+
+        
+dis = Discriminator_clip().cuda()
+dummydata = torch.randn([batch_size,3,128,128]).cuda()
+print(dis(dummydata).shape)
+
+
+del dis
+del dummydata
+
+
+# In[10]:
+
+
+class Discriminator_normal(nn.Module):
     
     def __init__(self, d=64):
         super().__init__()
@@ -177,7 +190,7 @@ class Discriminator(nn.Module):
         return x
 
         
-dis = Discriminator(64).cuda()
+dis = Discriminator_normal().cuda()
 dummydata = torch.randn([batch_size,3,128,128]).cuda()
 print(dis(dummydata).shape)
 
@@ -189,13 +202,38 @@ del dummydata
 # In[11]:
 
 
+class Discriminator_mix(nn.Module):
+    
+    def __init__(self, d=64):
+        super().__init__()
+        
+        self.clip_disc = Discriminator_clip()
+        self.disc_norm = Discriminator_normal(d=d)
+        
+    def forward(self, x, clip_frac = 0.5):
+        x_clip = self.clip_disc(x)
+        x_norm = self.disc_norm(x)
+        return clip_frac * x_clip + (1 - clip_frac) * x_norm
+    
+dis = Discriminator_mix().cuda()
+dummydata = torch.randn([batch_size,3,128,128]).cuda()
+print(dis(dummydata).shape)
+
+
+del dis
+del dummydata
+
+
+# In[12]:
+
+
 from torchvision.transforms import Resize, RandomCrop, RandomHorizontalFlip, ToTensor, Normalize, Compose, InterpolationMode
 
 transform_pipeline = Compose([
     RandomCrop(200),
     RandomHorizontalFlip(p=0.5),
     Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    Resize(256, InterpolationMode.BICUBIC)
+    Resize(128, InterpolationMode.BICUBIC)
 ])
 
 def unprocess(img):
@@ -217,14 +255,14 @@ test = next(iter(A_loader))
 res = transform_pipeline(test)
 
 
-# In[21]:
+# In[14]:
 
 
 G_ab = Generator().cuda()
 G_ba = Generator().cuda()
 
-D_a = Discriminator(d=128).cuda()
-D_b = Discriminator(d=128).cuda()
+D_a = Discriminator_mix(64).cuda()
+D_b = Discriminator_mix(64).cuda()
 
 opt_G = Adam(list(G_ab.parameters()) + list(G_ba.parameters()), lr=0.0002, betas=(0.5, 0.999))
 opt_D_a = Adam(D_a.parameters(), lr=0.0001, betas=(0.5, 0.999))
@@ -232,7 +270,7 @@ opt_D_b = Adam(D_b.parameters(), lr=0.0001, betas=(0.5, 0.999))
 losses = [[], [], []]
 
 
-# In[22]:
+# In[15]:
 
 
 def saver(G_ab, G_ba, D_a, D_b, exp_id = ""):
@@ -251,7 +289,7 @@ def saver(G_ab, G_ba, D_a, D_b, exp_id = ""):
         
 
 
-# In[23]:
+# In[17]:
 
 
 epochs = 999
@@ -260,8 +298,10 @@ last_save = time()
 
 for i in range(epochs):
     
+    clip_frac = i / (epochs + 1)
+    
     if time() - last_save >= 1800:
-        last_save = time()
+        last_save = last_save + 1800
         saver(G_ab, G_ba, D_a, D_b, exp_id)
     
     for a_batch, b_batch in zip(A_loader, B_loader):
@@ -282,7 +322,7 @@ for i in range(epochs):
 
         # let's fool the discriminator a bit...
         fake_a, fake_b = G_ba(b_batch), G_ab(a_batch)
-        loss_fool_d = (nnf.mse_loss(D_a(fake_a), ones) + nnf.mse_loss(D_b(fake_b), ones)) / 2
+        loss_fool_d = (nnf.mse_loss(D_a(fake_a, clip_frac=clip_frac), ones) + nnf.mse_loss(D_b(fake_b, clip_frac=clip_frac), ones)) / 2
 
         # by applying the generators twice we should be back at the initial sample
         loss_cycle = (nnf.l1_loss(G_ba(fake_b), a_batch) + nnf.l1_loss(G_ab(fake_a), b_batch)) / 2
@@ -293,15 +333,15 @@ for i in range(epochs):
 
         # train discriminator A
         opt_D_a.zero_grad()
-        loss_d_a = 0.5 * nnf.mse_loss(D_a(a_batch), ones)
-        loss_d_a += 0.5 * nnf.mse_loss(D_a(fake_a.detach()), zeros)
+        loss_d_a = 0.5 * nnf.mse_loss(D_a(a_batch, clip_frac=clip_frac), ones)
+        loss_d_a += 0.5 * nnf.mse_loss(D_a(fake_a.detach(), clip_frac=clip_frac), zeros)
         loss_d_a.backward()
         opt_D_a.step()
 
         # train discriminator B
         opt_D_b.zero_grad()
-        loss_d_b = 0.5 * nnf.mse_loss(D_b(b_batch), ones)
-        loss_d_b += 0.5 * nnf.mse_loss(D_b(fake_b.detach()), zeros)
+        loss_d_b = 0.5 * nnf.mse_loss(D_b(b_batch, clip_frac=clip_frac), ones)
+        loss_d_b += 0.5 * nnf.mse_loss(D_b(fake_b.detach(), clip_frac=clip_frac), zeros)
         loss_d_b.backward()
         opt_D_b.step()
 
@@ -317,7 +357,7 @@ for i in range(epochs):
     print(f'generator: {np.mean(losses[0]):.5f}, D_a: {np.mean(losses[1]):.5f}, D_b: {np.mean(losses[2]):.5f}')
 
 
-# In[9]:
+# In[10]:
 
 
 test_a = next(iter(A_loader))
@@ -329,7 +369,7 @@ res = G_ab(test_a[:10].cuda()).cpu().detach()
 show(res)
 
 
-# In[10]:
+# In[11]:
 
 
 test_b = next(iter(B_loader))
